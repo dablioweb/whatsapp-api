@@ -1,5 +1,14 @@
-const { Client, MessageMedia, LocalAuth } = require('whatsapp-web.js');
+const { Client, MessageMedia, LocalAuth, Buttons } = require('whatsapp-web.js');
+const createError = require('http-errors');
 const express = require('express');
+const mysql = require('mysql');
+const dbconfig = require('./config/db.config');
+const auth = require('./middleware/auth');
+const errors = require('./middleware/error');
+const {unless} = require('express-unless');
+const path = require('path');
+const cookieParser = require('cookie-parser');
+const logger = require('morgan');
 const { body, validationResult } = require('express-validator');
 const socketIO = require('socket.io');
 const qrcode = require('qrcode');
@@ -9,179 +18,416 @@ const { phoneNumberFormatter } = require('./helpers/formatter');
 const fileUpload = require('express-fileupload');
 const axios = require('axios');
 const mime = require('mime-types');
+let debug = require('debug')('login-api:server');
+const jwt = require('jsonwebtoken')
+const userController = require('./controllers/user.controller');
+const usermodel = require('./models/usermodel');
 
-const port = process.env.PORT || 8000;
+//routers
+const apiwebRouter = require('./routes/apiweb.js');
+const loginRouter = require('./routes/login.js');
+const usersRouter = require('./routes/users.js');
+const registroRouter = require('./routes/registro.js');
+const dbConfig = require('./config/db.config');
+const { response } = require('express');
 
 const app = express();
-const server = http.createServer(app);
-const io = socketIO(server);
-
+// view engine setup
+app.set('views', path.join(__dirname, 'views'));
+app.set('view engine', 'ejs');
+app.use(logger('dev'));
 app.use(express.json());
-app.use(express.urlencoded({
-  extended: true
-}));
-
-/**
- * BASED ON MANY QUESTIONS
- * Actually ready mentioned on the tutorials
- * 
- * Many people confused about the warning for file-upload
- * So, we just disabling the debug for simplicity.
- */
+app.use(express.urlencoded({ extended: false }));
+app.use(cookieParser());
+app.use(express.static(path.join(__dirname, 'public')));
 app.use(fileUpload({
   debug: false
 }));
 
-app.get('/', (req, res) => {
-  res.sendFile('index.html', {
-    root: __dirname
+//routers
+app.get('/logout', (req, res) => {
+  // clear the cookie
+  res.clearCookie("access_token");
+  // redirect to login
+  return res.redirect("/login");
+});
+
+app.use("/login", loginRouter);
+//app.use("/users", usersRouter);
+app.use("/registro", registroRouter);
+app.use("/apiweb", apiwebRouter);
+app.get("/", (req, res) => {
+  res.redirect("/login");
+});
+
+app.post('/auth', function (req, res, next) {
+ console.log('auth')
+  userController.autht(req, res, function (err, user) {
+    if (err) {
+      res.end("Error: " + err);
+    } else {
+      if (user) {
+        req.session.user = user.email;
+        res.end("logado");
+      } else {
+        res.end("Usuario Invalido");
+      }
+    }
   });
 });
 
-const client = new Client({
-  restartOnAuthFail: true,
-  puppeteer: {
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--single-process', // <- this one doesn't works in Windows
-      '--disable-gpu'
-    ],
-  },
-  authStrategy: new LocalAuth()
-});
+//unless awt
+/*
+ auth.authenticateToken.unless = unless;
+ app.use(
+   auth.authenticateToken.unless({
+     path: [
+       { url: '/', methods: ['GET', 'PUT', 'POST'] },
+       { url: '/login', methods: ['GET', 'PUT', 'POST'] },
+       { url: '/registro', methods: ['GET', 'PUT', 'POST'] },
+       { url: '/socket.io', methods: ['GET', 'PUT', 'POST'] },
+       { url: '/auth', methods: ['GET', 'PUT', 'POST'] },
+     ],
+   })
+ );
+*/
+// WHATSAPP WEB API
+let podecriar = true;
+global.podecriar = true;
+const server = http.createServer(app);
 
-client.on('message', msg => {
-  if (msg.body == '!ping') {
-    msg.reply('pong');
-  } else if (msg.body == 'good morning') {
-    msg.reply('selamat pagi');
-  } else if (msg.body == '!groups') {
-    client.getChats().then(chats => {
-      const groups = chats.filter(chat => chat.isGroup);
+const io = socketIO(server);
 
-      if (groups.length == 0) {
-        msg.reply('You have no group yet.');
-      } else {
-        let replyMsg = '*YOUR GROUPS*\n\n';
-        groups.forEach((group, i) => {
-          replyMsg += `ID: ${group.id._serialized}\nName: ${group.name}\n\n`;
-        });
-        replyMsg += '_You can use the group id to send a message to the group._'
-        msg.reply(replyMsg);
-      }
-    });
+const sessions = [];
+const SESSIONS_FILE = './whatsapp-sessions.json';
+
+const createSessionsFileIfNotExists = function () {
+  if (!fs.existsSync(SESSIONS_FILE)) {
+    try {
+      fs.writeFileSync(SESSIONS_FILE, JSON.stringify([]));
+      console.log('Sessions file created successfully.');
+    } catch (err) {
+      console.log('Failed to create sessions file: ', err);
+    }
+  }
+}
+
+createSessionsFileIfNotExists();
+
+const setSessionsFile = function (sessions) {
+  fs.writeFile(SESSIONS_FILE, JSON.stringify(sessions), function (err) {
+    if (err) {
+      console.log(err);
+    }
+  });
+}
+
+const getSessionsFile = function () {
+  return JSON.parse(fs.readFileSync(SESSIONS_FILE));
+}
+
+const createSession = async function (id, description, webhook, email) {
+  let email2 = global.emailvalor
+
+  // pega o maximo de sessões da database
+  const getMaxSessionsByEmail = usermodel.getMaxSessionsByEmail;
+  let maxSessions = await getMaxSessionsByEmail(email2);
+  console.log(maxSessions)
+  if (maxSessions === null || maxSessions === undefined) {
+    maxSessions = 3;
   }
 
-  // NOTE!
-  // UNCOMMENT THE SCRIPT BELOW IF YOU WANT TO SAVE THE MESSAGE MEDIA FILES
-  // Downloading media
-  // if (msg.hasMedia) {
-  //   msg.downloadMedia().then(media => {
-  //     // To better understanding
-  //     // Please look at the console what data we get
-  //     console.log(media);
+  // filtra o array com apenas emails iguais ao email da sessão
+  console.log(email2)
+  const userSessions = sessions.filter((session) => session.email === email2);
 
-  //     if (media) {
-  //       // The folder to store: change as you want!
-  //       // Create if not exists
-  //       const mediaPath = './downloaded-media/';
+  // se o filtro for maior ou igual ao maximo de sessões, retorna
+  if (userSessions.length >= maxSessions) {
+    io.emit('maxreached', { email: email, text: 'Voce Atingiu o limite de sessões' });
+    global.podecriar = false;
+    podecriar = false;
+  }else{
+    podecriar = true;
+    global.podecriar = true;
+  }
 
-  //       if (!fs.existsSync(mediaPath)) {
-  //         fs.mkdirSync(mediaPath);
-  //       }
+ if(podecriar) {
+  let email2 = global.emailvalor
+  console.log(email2)
+  console.log('Creating session: ' + id);
+  const client = new Client({
+    restartOnAuthFail: true,
+    puppeteer: {
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process', // <- this one doesn't works in Windows
+        '--disable-gpu'
+      ],
+    },
+    authStrategy: new LocalAuth({
+      clientId: id
+    })
+  });
 
-  //       // Get the file extension by mime-type
-  //       const extension = mime.extension(media.mimetype);
-        
-  //       // Filename: change as you want! 
-  //       // I will use the time for this example
-  //       // Why not use media.filename? Because the value is not certain exists
-  //       const filename = new Date().getTime();
-
-  //       const fullFilename = mediaPath + filename + '.' + extension;
-
-  //       // Save to file
-  //       try {
-  //         fs.writeFileSync(fullFilename, media.data, { encoding: 'base64' }); 
-  //         console.log('File downloaded successfully!', fullFilename);
-  //       } catch (err) {
-  //         console.log('Failed to save the file:', err);
-  //       }
-  //     }
-  //   });
-  // }
-});
-
-client.initialize();
-
-// Socket IO
-io.on('connection', function(socket) {
-  socket.emit('message', 'Connecting...');
+  client.initialize();
 
   client.on('qr', (qr) => {
     console.log('QR RECEIVED', qr);
     qrcode.toDataURL(qr, (err, url) => {
-      socket.emit('qr', url);
-      socket.emit('message', 'QR Code received, scan please!');
+      io.emit('qr', { id: id, src: url });
+      io.emit('message', { id: id, text: 'QR Code received, scan please!' });
     });
   });
 
   client.on('ready', () => {
-    socket.emit('ready', 'Whatsapp is ready!');
-    socket.emit('message', 'Whatsapp is ready!');
+    io.emit('ready', { id: id });
+    io.emit('message', { id: id, text: 'Whatsapp is ready!' });
+
+    const savedSessions = getSessionsFile();
+    const sessionIndex = savedSessions.findIndex(sess => sess.id == id);
+    savedSessions[sessionIndex].ready = true;
+    setSessionsFile(savedSessions);
+  });
+
+  client.on('message', async (msg) => {
+    /*if (msg.body == '!ping') {
+        msg.reply('pong');
+    }*/
+    try {
+      if (webhook != "" && webhook != null) {
+        let chat = await msg.getChat();
+        const searchOptions = {
+          limit: 1,
+          fromMe: true
+        };
+        chat.sendStateTyping()
+        var lastMessages = await chat.fetchMessages(searchOptions)
+        var lastMessage = lastMessages[0];
+        var ultimamsg = lastMessage.body
+        let response = await getResponseWebhook(webhook, msg, id, ultimamsg);
+        console.log("resposta: " + JSON.stringify(response));
+        response.reply.forEach(responseReceived => {
+          msg.reply(responseReceived.message);
+          chat.clearState()
+        });
+      }
+    } catch (e) {
+      console.log("sem resposta")
+    }
   });
 
   client.on('authenticated', () => {
-    socket.emit('authenticated', 'Whatsapp is authenticated!');
-    socket.emit('message', 'Whatsapp is authenticated!');
-    console.log('AUTHENTICATED');
+    io.emit('authenticated', { id: id });
+    io.emit('message', { id: id, text: 'Whatsapp is authenticated!' });
   });
 
-  client.on('auth_failure', function(session) {
-    socket.emit('message', 'Auth failure, restarting...');
+  client.on('auth_failure', function () {
+    io.emit('message', { id: id, text: 'Auth failure, restarting...' });
   });
 
   client.on('disconnected', (reason) => {
-    socket.emit('message', 'Whatsapp is disconnected!');
+    io.emit('message', { id: id, text: 'Whatsapp is disconnected!' });
     client.destroy();
     client.initialize();
+
+    // Menghapus pada file sessions
+    const savedSessions = getSessionsFile();
+    const sessionIndex = savedSessions.findIndex(sess => sess.id == id);
+    savedSessions.splice(sessionIndex, 1);
+    setSessionsFile(savedSessions);
+
+    io.emit('remove-session', id);
+  });
+ if(email == undefined){
+   sessions.push({
+     id: id,
+     description: description,
+     client: client,
+     webhook: webhook,
+     email: email2,
+   });
+ } else {
+   sessions.push({
+     id: id,
+     description: description,
+     client: client,
+     webhook: webhook,
+     email: email,
+   });
+   }
+
+
+  // Menambahkan session ke file
+  const savedSessions = getSessionsFile();
+  const sessionIndex = savedSessions.findIndex(sess => sess.id == id);
+
+  if (sessionIndex == -1) {
+    savedSessions.push({
+      id: id,
+      webhook: webhook,
+      description: description,
+      email: email2,
+      ready: false,
+    });
+    setSessionsFile(savedSessions);
+  }
+ } else {
+   console.log("nao pode criar")
+ }
+}
+
+const init = function (socket) {
+  const savedSessions = getSessionsFile();
+  if (savedSessions.length > 0) {
+    if (socket) {
+      /**
+       * At the first time of running (e.g. restarting the server), our client is not ready yet!
+       * It will need several time to authenticating.
+       *
+       * So to make people not confused for the 'ready' status
+       * We need to make it as FALSE for this condition
+       */
+      savedSessions.forEach((e, i, arr) => {
+        arr[i].ready = false;
+      });
+
+      socket.emit('init', savedSessions);
+    } else {
+      savedSessions.forEach(sess => {
+        createSession(sess.id, sess.description, sess.webhook, sess.email);
+      });
+    }
+  }
+}
+
+init();
+
+// Socket IO
+io.on('connection', function (socket) {
+  init(socket);
+
+  socket.on('create-session', function (data) {
+    console.log('Create session: ' + data.id);
+    createSession(data.id, data.description, data.webhook, data.email);
   });
 });
 
+app.post('/send-buttons', async (req, res) => {
+  console.log("Enviando Botão!");
+  //console.log(req);
+  const sender = req.body.sender;
+  const number = phoneNumberFormatter(req.body.number);
+  const message = req.body.message;
+  //const reply = new Buttons(message, [{body: 'Test', id: 'test-1'}], "title", 'footer') // Reply button
+  //const reply_url = new Buttons(message, [{id:'customId',body:'button1'},{body:'button2'},{body:'button3'},{body:'button4'}], 'title', 'footer') // Reply button with URL
+  //const reply_call = new Buttons(message, [{body: 'Test', id: 'test-1'}, {body: "Test 2 Call", url: "+1 (234) 567-8901"}], 'title', 'footer') // Reply button with call button
+  const reply_call_url = new Buttons(message, [{ body: 'Test', id: 'test-1' }, { body: "Test 2 Call", url: "+1 (234) 567-8901" }, { body: 'Test 3 URL', url: 'https://wwebjs.dev' }], 'title', 'footer') // Reply button with call button & url button
+  console.log(reply_call_url);
 
-const checkRegisteredNumber = async function(number) {
+  let email = null
+  const jwtCookie = req.cookies['access_token'];
+  if (jwtCookie) {
+    try {
+      const decodedToken = jwt.verify(jwtCookie, process.env.ACCESS_TOKEN_SECRET);
+      email = decodedToken.data;
+      console.log(email)
+    } catch (err) {
+      console.log(err)
+    }
+  } else {
+    console.log('sem cookies')
+  }
+  console.log(sessions)
+  const client = sessions.find(sess => sess.id == sender)?.client;
+  if (email !== sessions.find(sess => sess.email === email)?.email) {
+    return res.status(422).json({
+      status: false,
+      message: `Credenciais Incorretas`
+    })
+  }
+  // Make sure the sender is exists & ready
+  if (!client) {
+    return res.status(422).json({
+      status: false,
+      message: `The sender: ${sender} is not found!`
+    })
+  }
+
+  const isRegisteredNumber = await checkRegisteredNumber(client, number);
+
+  if (!isRegisteredNumber) {
+    return res.status(422).json({
+      status: false,
+      message: 'The number is not registered'
+    });
+  }
+
+  client.sendMessage(number, reply_call_url).then(response => {
+    res.status(200).json({
+      status: true,
+      response: response
+    });
+  }).catch(err => {
+    res.status(500).json({
+      status: false,
+      response: err
+    });
+  });
+});
+
+const checkRegisteredNumber = async function (client, number) {
   const isRegistered = await client.isRegisteredUser(number);
   return isRegistered;
 }
 
 // Send message
-app.post('/send-message', [
-  body('number').notEmpty(),
-  body('message').notEmpty(),
-], async (req, res) => {
-  const errors = validationResult(req).formatWith(({
-    msg
-  }) => {
-    return msg;
-  });
-
-  if (!errors.isEmpty()) {
+app.post('/send-message', async (req, res) => {
+  const sender = req.body.sender;
+  const number = phoneNumberFormatter(req.body.number);
+  const message = JSON.parse(`"${req.body.message}"`);
+  let email = null
+  const jwtCookie = req.cookies['access_token'];
+  if (jwtCookie) {
+    try {
+      const decodedToken = jwt.verify(jwtCookie, process.env.ACCESS_TOKEN_SECRET);
+      email = decodedToken.data;
+      console.log(email)
+    } catch (err) {
+      console.log(err)
+    }
+  } else {
+    console.log('sem cookies')
+  }
+  console.log(sessions)
+  const client = sessions.find(sess => sess.id == sender)?.client;
+  if (email !== sessions.find(sess => sess.email === email)?.email){
     return res.status(422).json({
       status: false,
-      message: errors.mapped()
-    });
+      message: `Credenciais Incorretas`
+    })
+  }
+  // Make sure the sender is exists & ready
+  if (!client) {
+    return res.status(422).json({
+      status: false,
+      message: `The sender: ${sender} is not found!`
+    })
   }
 
-  const number = phoneNumberFormatter(req.body.number);
-  const message = req.body.message;
-
-  const isRegisteredNumber = await checkRegisteredNumber(number);
+  /**
+   * Check if the number is already registered
+   * Copied from app.js
+   *
+   * Please check app.js for more validations example
+   * You can add the same here!
+   */
+  const isRegisteredNumber = await client.isRegisteredUser(number);
 
   if (!isRegisteredNumber) {
     return res.status(422).json({
@@ -203,24 +449,63 @@ app.post('/send-message', [
   });
 });
 
-// Send media
+/*Envia midias*/
 app.post('/send-media', async (req, res) => {
   const number = phoneNumberFormatter(req.body.number);
   const caption = req.body.caption;
-  const fileUrl = req.body.file;
+  const fileUrl = req?.files != null ? req.files.file : req.body.file;
+  const sender = req.body.sender;
 
-  // const media = MessageMedia.fromFilePath('./image-example.png');
-  // const file = req.files.file;
-  // const media = new MessageMedia(file.mimetype, file.data.toString('base64'), file.name);
+  let email = null
+  const jwtCookie = req.cookies['access_token'];
+  if (jwtCookie) {
+    try {
+      const decodedToken = jwt.verify(jwtCookie, process.env.ACCESS_TOKEN_SECRET);
+      email = decodedToken.data;
+      console.log(email)
+    } catch (err) {
+      console.log(err)
+    }
+  } else {
+    console.log('sem cookies')
+  }
+  console.log(sessions)
+  const client = sessions.find(sess => sess.id == sender)?.client;
+  if (email !== sessions.find(sess => sess.email === email)?.email) {
+    return res.status(422).json({
+      status: false,
+      message: `Credenciais Incorretas`
+    })
+  }
+  console.log(fileUrl)
+  // Make sure the sender is exists & ready
+  if (!client) {
+    return res.status(422).json({
+      status: false,
+      message: `The sender: ${sender} is not found!`
+    });
+  }
+
+  if (!fileUrl) {
+    return res.status(400).json({
+      status: false,
+      message: "fileUrl argument is missing or invalid"
+    });
+  }
+  let media = null;
   let mimetype;
-  const attachment = await axios.get(fileUrl, {
-    responseType: 'arraybuffer'
-  }).then(response => {
-    mimetype = response.headers['content-type'];
-    return response.data.toString('base64');
-  });
+  if (req?.files == null) {
+    const attachment = await axios.get(fileUrl, {
+      responseType: 'arraybuffer'
+    }).then(response => {
+      mimetype = response.headers['content-type'];
+      return response.data.toString('base64');
+    }); media = new MessageMedia(mimetype, attachment, 'Media');
+  } else {
 
-  const media = new MessageMedia(mimetype, attachment, 'Media');
+    file = req.files.file;
+    media = new MessageMedia(file.mimetype, file.data.toString('base64'), file.name);
+  }
 
   client.sendMessage(number, media, {
     caption: caption
@@ -237,56 +522,68 @@ app.post('/send-media', async (req, res) => {
   });
 });
 
-const findGroupByName = async function(name) {
-  const group = await client.getChats().then(chats => {
-    return chats.find(chat => 
-      chat.isGroup && chat.name.toLowerCase() == name.toLowerCase()
-    );
-  });
-  return group;
-}
 
-// Send message to group
-// You can use chatID or group name, yea!
-app.post('/send-group-message', [
-  body('id').custom((value, { req }) => {
-    if (!value && !req.body.name) {
-      throw new Error('Invalid value, you can use `id` or `name`');
+/*Envia midias*/
+app.post('/send-ptt', async (req, res) => {
+  const number = phoneNumberFormatter(req.body.number);
+  const caption = req.body.caption;
+  const fileUrl = req?.files != null ? req.files.file : req.body.file;
+  const sender = req.body.sender;
+
+  let email = null
+  const jwtCookie = req.cookies['access_token'];
+  if (jwtCookie) {
+    try {
+      const decodedToken = jwt.verify(jwtCookie, process.env.ACCESS_TOKEN_SECRET);
+      email = decodedToken.data;
+      console.log(email)
+    } catch (err) {
+      console.log(err)
     }
-    return true;
-  }),
-  body('message').notEmpty(),
-], async (req, res) => {
-  const errors = validationResult(req).formatWith(({
-    msg
-  }) => {
-    return msg;
-  });
-
-  if (!errors.isEmpty()) {
+  } else {
+    console.log('sem cookies')
+  }
+  console.log(sessions)
+  const client = sessions.find(sess => sess.id == sender)?.client;
+  if (email !== sessions.find(sess => sess.email === email)?.email) {
     return res.status(422).json({
       status: false,
-      message: errors.mapped()
+      message: `Credenciais Incorretas`
+    })
+  }
+
+  // Make sure the sender is exists & ready
+  if (!client) {
+    return res.status(422).json({
+      status: false,
+      message: `The sender: ${sender} is not found!`
+    })
+  }
+  if (!fileUrl) {
+    return res.status(400).json({
+      status: false,
+      message: "fileUrl argument is missing or invalid"
     });
   }
+  let media = null;
+  let mimetype;
+  if (req?.files == null) {
+    const attachment = await axios.get(fileUrl, {
+      responseType: 'arraybuffer'
+    }).then(response => {
+      mimetype = response.headers['content-type'];
+      return response.data.toString('base64');
+    }); media = new MessageMedia(mimetype, attachment, 'Media');
+  } else {
 
-  let chatId = req.body.id;
-  const groupName = req.body.name;
-  const message = req.body.message;
-
-  // Find the group by name
-  if (!chatId) {
-    const group = await findGroupByName(groupName);
-    if (!group) {
-      return res.status(422).json({
-        status: false,
-        message: 'No group found with name: ' + groupName
-      });
-    }
-    chatId = group.id._serialized;
+    file = req.files.file;
+    media = new MessageMedia(file.mimetype, file.data.toString('base64'), file.name);
   }
 
-  client.sendMessage(chatId, message).then(response => {
+  client.sendMessage(number, media, {
+    sendAudioAsVoice: true,
+    caption: caption
+  }).then(response => {
     res.status(200).json({
       status: true,
       response: response
@@ -299,49 +596,175 @@ app.post('/send-group-message', [
   });
 });
 
-// Clearing message on spesific chat
-app.post('/clear-message', [
-  body('number').notEmpty(),
-], async (req, res) => {
-  const errors = validationResult(req).formatWith(({
-    msg
-  }) => {
-    return msg;
+async function getResponseWebhook(url, message, sender, ultimamsg) {
+  let requestDefaultString = JSON.stringify({
+    "appName": "zapflow",
+    "query": {
+      "sender": sender,
+      "message": message.body,
+      "isGroup": false,
+      "isMedia": message.hasMedia,
+      "ruleId": message.from,
+      "lastmessage": ultimamsg
+    }
   });
 
-  if (!errors.isEmpty()) {
-    return res.status(422).json({
-      status: false,
-      message: errors.mapped()
-    });
+  console.log("Enviando data: " + JSON.stringify(requestDefaultString));
+
+  let res = await axios({
+    method: 'POST',
+    url,
+    data: requestDefaultString,
+    headers: { 'Content-Type': 'application/json; charset=utf-8' }
+  });
+  if (res.status == 200) {
+    return res.data;
+  }
+  return null;
+}
+
+async function getMyLastMessage(number) {
+
+  var myMessage = "NotFound";
+  var chat = await getChatModelByNumber(number);
+  var msgs = chat.msgs._models;
+
+  try {
+    for (var i = 0; i < msgs.length; i++) {
+
+      if (msgs[i].x_isSentByMe !== null && msgs[i].x_isSentByMe !== undefined) {
+        if (msgs[i].x_isSentByMe === true) {
+          myMessage = msgs[i].x_text;
+        }
+      }
+
+    }
+  } catch (e) {
+
   }
 
-  const number = phoneNumberFormatter(req.body.number);
+  return myMessage;
 
-  const isRegisteredNumber = await checkRegisteredNumber(number);
+}
 
-  if (!isRegisteredNumber) {
-    return res.status(422).json({
-      status: false,
-      message: 'The number is not registered'
-    });
+async function getChatModelByNumber(number) {
+
+  var chats = window.Store.Chat._models;
+  var chatID;
+
+  for (var c = 0; c < chats.length; c++) {
+
+    if (chats[c].x_id !== null) {
+      if (chats[c].x_id.user === number) {
+        chatID = chats[c];
+      }
+    }
+
   }
 
-  const chat = await client.getChatById(number);
-  
-  chat.clearMessages().then(status => {
-    res.status(200).json({
-      status: true,
-      response: status
-    });
-  }).catch(err => {
-    res.status(500).json({
-      status: false,
-      response: err
-    });
-  })
+  return chatID;
+
+}
+
+app.get('/get-podecriar', function (req, res) {
+  res.send(global.podecriar);
 });
 
-server.listen(port, function() {
-  console.log('App running on *: ' + port);
+
+// catch 404 and forward to error handler
+app.use(function (req, res, next) {
+  next(createError(404));
 });
+
+// error handler
+app.use(function (err, req, res, next) {
+  // set locals, only providing error in development
+  res.locals.message = err.message;
+  res.locals.error = req.app.get('env') === 'development' ? err : {};
+
+  // render the error page
+  res.status(err.status || 500);
+  res.render('error');
+});
+
+
+/**
+ * Get port from environment and store in Express.
+ */
+
+let port = normalizePort(process.env.PORT || '8001');
+app.set('port', port);
+
+
+/**
+ * Listen on provided port, on all network interfaces.
+ */
+
+server.listen(port);
+server.on('error', onError);
+server.on('listening', onListening);
+
+/**
+ * Normalize a port into a number, string, or false.
+ */
+
+function normalizePort(val) {
+  let port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // named pipe
+    return val;
+  }
+
+  if (port >= 0) {
+    // port number
+    return port;
+  }
+
+  return false;
+}
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  let bind = typeof port === 'string'
+    ? 'Pipe ' + port
+    : 'Port ' + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case 'EACCES':
+      console.error(bind + ' requires elevated privileges');
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(bind + ' is already in use');
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+  let addr = server.address();
+  let bind = typeof addr === 'string'
+    ? 'pipe ' + addr
+    : 'port ' + addr.port;
+  debug('Listening on ' + bind);
+}
+
+
+
+
+module.exports = app;

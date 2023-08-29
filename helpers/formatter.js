@@ -1,5 +1,9 @@
 const phoneNumberFormatter = function(number) {
-  // 1. Menghilangkan karakter selain angka
+  //checa se esta vazio
+    if (!number) {
+    return '';
+  }
+
   let formatted = number.replace(/\D/g, '');
 
   // 2. Menghilangkan angka 0 di depan (prefix)

@@ -1,0 +1,8 @@
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+let http = require('http');
+let app = require('../app');
+let socketIO = require('socket.io');

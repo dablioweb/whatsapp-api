@@ -17,8 +17,8 @@ nano start.sh
 
 bash start.sh 
 
-http://localhost:8000
+http://localhost:8001
 
 # Caso não abra
 
-sudo ufw allow 8000
+sudo ufw allow 8001
